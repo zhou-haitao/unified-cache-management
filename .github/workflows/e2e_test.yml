@@ -20,6 +20,7 @@ jobs:
             -c "
               set -euo pipefail
               export PLATFORM=cuda
+              export PLATFORM=cuda
               export MODEL_PATH=/home/models/Qwen2.5-1.5B-Instruct
               pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
               pip install -v -e . --no-build-isolation
