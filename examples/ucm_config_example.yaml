@@ -11,10 +11,17 @@
 ucm_connectors:
   - ucm_connector_name: "UcmNfsStore"
     ucm_connector_config:
-      storage_backends: "/mnt/test"
+      storage_backends: "/home/zht/zht_3/test_data/ucm_data"
       io_direct: false
 
 load_only_first_rank: false
+
+
+record_config:
+  enable: True
+  log_path: "/home/zht/zht_3/unified-cache-management/ucm/store/test/e2e/temp/ucm_ops.log"
+  flush_size: 10
+  flush_interval: 5.0
 
 # Enable UCM metrics so they can be monitored online via Grafana and Prometheus.
 # metrics_config_path: "/workspace/unified-cache-management/examples/metrics/metrics_configs.yaml"

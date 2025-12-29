@@ -25,6 +25,7 @@ from ucm.shared.metrics.observability import UCMStatsLogger
 from ucm.store.factory_v1 import UcmConnectorFactoryV1
 from ucm.store.ucmstore_v1 import Task, UcmKVStoreBaseV1
 from ucm.utils import Config
+from ucm.profiling.profiler import Profiler
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -158,6 +159,7 @@ class UCMDirectConnector(KVConnectorBase_V1):
 
         # invlalid block ids due to load errors
         self._invalid_block_ids: set[int] = set()
+        self.profiler = Profiler(self.launch_config, self.block_size, self.local_rank)
 
     def generate_hash(self, block_size: int, request: "Request") -> list[bytes]:
         token_ids = request.all_token_ids
@@ -514,7 +516,8 @@ class UCMDirectConnector(KVConnectorBase_V1):
         is_load = False
         num_loaded_block = 0
         num_loaded_request = 0
-        load_start_time = time.perf_counter() * 1000
+        num_req = 0
+        load_start_time = time.perf_counter()
         for request_id, request in metadata.request_meta.items():
             if len(request.load_block_ids[0]) == 0:
                 continue
@@ -543,6 +546,13 @@ class UCMDirectConnector(KVConnectorBase_V1):
                     self._invalid_block_ids.update(
                         metadata.request_meta[request_id].load_block_ids[1]
                     )
+                self.profiler.log_operation(
+                    {
+                        "op_type": "load",
+                        "blocks": ucm_block_ids,
+                    }
+                )
+                num_req += 1
             else:
                 request_to_task[request_id] = None
 
@@ -560,11 +570,12 @@ class UCMDirectConnector(KVConnectorBase_V1):
                     )
             if self.load_only_first_rank:
                 self._broadcast(req_broadcast_addr[request_id])
-        load_end_time = time.perf_counter() * 1000
+        load_end_time = time.perf_counter()
         load_speed = (
             num_loaded_block
             * self.block_data_size
             / (load_end_time - load_start_time)
+            / 1024
             / 1024
             / 1024
         )  # GB/s
@@ -578,6 +589,9 @@ class UCMDirectConnector(KVConnectorBase_V1):
                     "load_speed": load_speed,
                 },
             )
+        if(num_req > 0):
+            logger.info(f"num_loaded_block: {num_loaded_block}, block_data_size: {self.block_data_size}, global_nums: {num_loaded_block* self.block_data_size/1024/1024/1024}GB \n time: {load_end_time - load_start_time}, num_req: {num_req}, load_blocks_num: {num_loaded_block}, load_speed: {load_speed}")
+        self.profiler.log_seed("load", load_speed, num_req)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         pass
@@ -593,6 +607,7 @@ class UCMDirectConnector(KVConnectorBase_V1):
 
     def wait_for_save(self) -> None:
 
+        torch.cuda.synchronize()
         # TODO support PP
         if (self.is_mla or self.is_dsa) and self.global_rank != 0:
             return
@@ -609,7 +624,8 @@ class UCMDirectConnector(KVConnectorBase_V1):
         is_save = False
         num_saved_block = 0
         num_saved_request = 0
-        save_start_time = time.perf_counter() * 1000
+        num_req = 0
+        save_start_time = time.perf_counter()
         for request_id, request in metadata.request_meta.items():
             if len(request.dump_block_ids[0]) == 0:
                 continue
@@ -634,7 +650,14 @@ class UCMDirectConnector(KVConnectorBase_V1):
                     request_to_task[request_id].append(rope_task)
             except RuntimeError as e:
                 logger.error(f"request {request_id} dump kv cache failed. {e}")
-
+                
+            self.profiler.log_operation(
+                {
+                    "op_type": "dump",
+                    "blocks": ucm_block_ids,
+                }
+            )
+            num_req += 1
         for request_id, tasks in request_to_task.items():
             try:
                 self.store.wait(tasks[0])
@@ -642,11 +665,12 @@ class UCMDirectConnector(KVConnectorBase_V1):
                     self.rope_store.wait(tasks[1])
             except RuntimeError as e:
                 logger.error(f"request {request_id} dump kv cache failed.{e}")
-        save_end_time = time.perf_counter() * 1000
+        save_end_time = time.perf_counter()
         save_speed = (
             num_saved_block
             * self.block_data_size
             / (save_end_time - save_start_time)
+            / 1024
             / 1024
             / 1024
         )  # GB/s
@@ -660,6 +684,9 @@ class UCMDirectConnector(KVConnectorBase_V1):
                     "save_speed": save_speed,
                 },
             )
+        if(num_req > 0):
+            logger.info(f"num_saved_blocks: {num_saved_block}, block_data_size: {self.block_data_size}, global_size: {num_saved_block* self.block_data_size/1024/1024/1024}GB \n time: {save_end_time - save_start_time}, num_req: {num_req}, save_blocks_num: {num_saved_block}, save_speed: {save_speed}")
+        self.profiler.log_seed("dump", save_speed, num_req)
 
     def clear_connector_metadata(self) -> None:
         super().clear_connector_metadata()
